@@ -15,7 +15,9 @@ import {
   mergePodSpecWithOptions,
   mergeObjectMeta,
   useKubeScheduler,
-  fixArgs
+  fixArgs,
+  copyNodeSelectorLabels,
+  getCopyNodeSelectorLabels
 } from './utils'
 
 const kc = new k8s.KubeConfig()
@@ -99,6 +101,10 @@ export async function createPod(
     appPod.spec.nodeName = await getCurrentNodeName()
   }
 
+  if (useKubeScheduler() && copyNodeSelectorLabels()) {
+    appPod.spec.nodeSelector = await getNodeSelectorLabels()
+  }
+
   const claimName = getVolumeClaimName()
   appPod.spec.volumes = [
     {
@@ -157,6 +163,10 @@ export async function createJob(
 
   if (!useKubeScheduler()) {
     job.spec.template.spec.nodeName = await getCurrentNodeName()
+  }
+
+  if (useKubeScheduler() && copyNodeSelectorLabels()) {
+    job.spec.template.spec.nodeSelector = await getNodeSelectorLabels()
   }
 
   const claimName = getVolumeClaimName()
@@ -528,6 +538,27 @@ export async function isPodContainerAlpine(
   }
 
   return isAlpine
+}
+
+async function getNodeSelectorLabels(): Promise<{ [key: string]: string }> {
+  const nodeSelectorLabels = {} as { [key: string]: string }
+  const copyLabels = getCopyNodeSelectorLabels()
+
+  // Fetch the node labels
+  const node = await k8sApi.readNode(await getCurrentNodeName())
+  const labels = node.body.metadata?.labels
+
+  copyLabels?.forEach(element => {
+    const label = labels?.[element]
+
+    if (!label) {
+      throw new Error(`Could not find the label "${element}" on the node`)
+    }
+
+    nodeSelectorLabels[element] = label
+  })
+
+  return nodeSelectorLabels
 }
 
 async function getCurrentNodeName(): Promise<string> {
