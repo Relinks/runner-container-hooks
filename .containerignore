@@ -1,0 +1,8 @@
+# Ignore all files by default
+*
+
+# Include the files that we actually need
+!packages/
+!package.json
+!package-lock.json
+!tsconfig.json
