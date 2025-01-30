@@ -6,7 +6,7 @@ import { Mount } from 'hooklib'
 import * as path from 'path'
 import { v1 as uuidv4 } from 'uuid'
 import { POD_VOLUME_NAME } from './index'
-import { CONTAINER_EXTENSION_PREFIX } from '../hooks/constants'
+import { CONTAINER_EXTENSION_PREFIX, JOB_CONTAINER_NAME } from '../hooks/constants'
 import * as shlex from 'shlex'
 
 export const DEFAULT_CONTAINER_ENTRY_POINT_ARGS = [`-f`, `/dev/null`]
@@ -16,6 +16,7 @@ export const ENV_HOOK_TEMPLATE_PATH = 'ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE'
 export const ENV_USE_KUBE_SCHEDULER = 'ACTIONS_RUNNER_USE_KUBE_SCHEDULER'
 export const ENV_COPY_NODE_SELECTOR_LABELS = 'ACTIONS_RUNNER_COPY_NODE_SELECTOR_LABELS'
 export const ENV_USE_POD_CP_VOLUME = 'ACTIONS_RUNNER_USE_POD_CP_VOLUME'
+export const ENV_OVERRIDES_PATH = 'ACTIONS_RUNNER_CONTAINER_OVERRIDES_PATH'
 
 export function containerVolumes(
   userMountVolumes: Mount[] = [],
@@ -259,16 +260,56 @@ export function mergeObjectMeta(
   }
 }
 
-export function readExtensionFromFile(): k8s.V1PodTemplateSpec | undefined {
-  const filePath = process.env[ENV_HOOK_TEMPLATE_PATH]
+export function applyContainerOverrides(base: k8s.V1PodSpec): void {
+  const doc = readYamlFile(process.env[ENV_OVERRIDES_PATH]) as undefined | { [key: string]: k8s.V1Container }
+  if (!doc) {
+    return
+  }
+
+  core.debug('Found the overrides file, processing the overrides')
+
+  const jobContainer = base.containers.find(c => c.name === JOB_CONTAINER_NAME)
+  if (!jobContainer) {
+    throw new Error(`Could not find the container with name "${JOB_CONTAINER_NAME}"`)
+  }
+
+  const containerImageParts = jobContainer.image?.split(':')
+  const containerImageRepository = containerImageParts?.[0]
+
+  core.debug(`Checking if the container image "${containerImageRepository}" has overrides`)
+
+  const key = Object.keys(doc).sort().find(k => {
+    if (!k.endsWith('*')) {
+      return k === containerImageRepository
+    }
+
+    return containerImageRepository?.startsWith(k.substring(0, k.length - 1))
+  })
+
+  if (!key) {
+    return
+  }
+
+  core.debug(`Found overrides for the container using key "${key}", applying them`)
+
+  mergeContainerWithOptions(jobContainer, doc[key])
+}
+
+function readYamlFile(filePath?: string): object | undefined {
   if (!filePath) {
     return undefined
   }
+
   const doc = yaml.load(fs.readFileSync(filePath, 'utf8'))
   if (!doc || typeof doc !== 'object') {
     throw new Error(`Failed to parse ${filePath}`)
   }
-  return doc as k8s.V1PodTemplateSpec
+
+  return doc
+}
+
+export function readExtensionFromFile(): k8s.V1PodTemplateSpec | undefined {
+  return readYamlFile(process.env[ENV_HOOK_TEMPLATE_PATH]) as undefined | k8s.V1PodTemplateSpec
 }
 
 export function useKubeScheduler(): boolean {

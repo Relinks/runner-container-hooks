@@ -18,7 +18,8 @@ import {
   fixArgs,
   copyNodeSelectorLabels,
   getCopyNodeSelectorLabels,
-  usePodCpVolume
+  usePodCpVolume,
+  applyContainerOverrides
 } from './utils'
 import * as fs from 'fs'
 import { WritableStreamBuffer } from 'stream-buffers'
@@ -162,6 +163,8 @@ export async function createPod(
   if (extension?.spec) {
     mergePodSpecWithOptions(appPod.spec, extension.spec)
   }
+
+  applyContainerOverrides(appPod.spec)
 
   const { body } = await k8sApi.createNamespacedPod(namespace(), appPod)
   return body
