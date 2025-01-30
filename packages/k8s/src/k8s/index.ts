@@ -17,8 +17,14 @@ import {
   useKubeScheduler,
   fixArgs,
   copyNodeSelectorLabels,
-  getCopyNodeSelectorLabels
+  getCopyNodeSelectorLabels,
+  usePodCpVolume
 } from './utils'
+import * as fs from 'fs'
+import { WritableStreamBuffer } from 'stream-buffers'
+import * as tar from 'tar'
+import tmp from 'tmp-promise'
+import { dirname, parse } from 'path'
 
 const kc = new k8s.KubeConfig()
 
@@ -105,13 +111,39 @@ export async function createPod(
     appPod.spec.nodeSelector = await getNodeSelectorLabels()
   }
 
-  const claimName = getVolumeClaimName()
-  appPod.spec.volumes = [
-    {
-      name: 'work',
-      persistentVolumeClaim: { claimName }
-    }
-  ]
+  appPod.spec.initContainers = await createInitContainers(jobContainer)
+
+  if (usePodCpVolume()) {
+    // TODO: Make the volume configurable (ephemeral or emptydir)
+    appPod.spec.volumes = [
+      {
+        name: POD_VOLUME_NAME,
+        ephemeral: {
+          volumeClaimTemplate: {
+            spec: {
+              accessModes: [
+                'ReadWriteOnce'
+              ],
+              resources: {
+                requests: {
+                  storage: '2Gi' // TODO: Configurable (env var?)
+                }
+              },
+              storageClassName: 'gp3' // TODO: Configurable (env var?)
+            }
+          }
+        }
+      }
+    ]
+  } else {
+    const claimName = getVolumeClaimName()
+    appPod.spec.volumes = [
+      {
+        name: POD_VOLUME_NAME,
+        persistentVolumeClaim: { claimName }
+      }
+    ]
+  }
 
   if (registry) {
     const secret = await createDockerSecret(registry)
@@ -133,6 +165,43 @@ export async function createPod(
 
   const { body } = await k8sApi.createNamespacedPod(namespace(), appPod)
   return body
+}
+
+async function createInitContainers(jobContainer?: k8s.V1Container): Promise<k8s.V1Container[]> {
+  const initContainers: k8s.V1Container[] = []
+
+  if (usePodCpVolume()) {
+    // We'll create an init container if the jobContainer has configured a working directory
+    // This is required in order to ensure that ther permissions on the working directory are correct
+    if (jobContainer?.workingDir) {
+      initContainers.push({
+        name: 'create-working-dir',
+        image: 'docker.io/library/busybox:1.37.0-musl',
+        securityContext: {
+          allowPrivilegeEscalation: false,
+          capabilities: {
+            drop: [
+              'ALL'
+            ]
+          }
+        },
+        command: [
+          'mkdir',
+          '-p',
+          jobContainer.workingDir,
+        ],
+        volumeMounts: [
+          {
+            name: POD_VOLUME_NAME,
+            mountPath: '/__w',
+            readOnly: false,
+          }
+        ]
+      })
+    }
+  }
+
+  return initContainers
 }
 
 export async function createJob(
@@ -228,6 +297,69 @@ export async function deletePod(podName: string): Promise<void> {
     undefined,
     0
   )
+}
+
+export async function cpToPod(podName: string, containerName: string, srcPath: string, tgtPath: string): Promise<void> {
+  // Unfortunately we can't use the k8s.Cp class as it contains a bug regarding stdin: https://github.com/kubernetes-client/javascript/pull/2038
+  // Also see: https://github.com/kubernetes-client/javascript/issues/982#issuecomment-1432485735
+  // Once it's fixed we should be able to use the following code:
+  // const cp = new k8s.Cp(kc)
+  // await cp.cToPod(namespace(), podName, containerName, parse(srcPath).base, tgtPath, dirname(srcPath))
+
+  const execInstance = new k8s.Exec(kc)
+  const tmpFile = tmp.fileSync()
+  const command = ['tar', 'xf', '-', '-C', tgtPath]
+
+  core.debug(`Archiving ${srcPath} to ${tmpFile.name}`)
+  await tar.c(
+    {
+      file: tmpFile.name,
+      cwd: dirname(srcPath)
+    },
+    [parse(srcPath).base]
+  )
+  const stdinStream = fs.createReadStream(tmpFile.name)
+  const stdErrStream = new WritableStreamBuffer()
+  const stdoutStream = new WritableStreamBuffer()
+  let resolved = false
+
+  core.debug(`Executing command "${command.join(' ')}" on pod ${namespace()}/${podName}`)
+
+  await new Promise<void>(async (resolve, reject) => {
+    const connection = await execInstance.exec(
+      namespace(),
+      podName,
+      containerName,
+      command,
+      stdoutStream,
+      stdErrStream,
+      stdinStream,
+      false,
+      async (response) => {
+        // This code is not reached for the reasons mentioned above, it might be fixed in a future release
+        if (response.status === 'Failure' || stdErrStream.size()) {
+          reject(new Error(`Error from cpToPod - details: \n ${stdErrStream.getContentsAsString()}`))
+        } else if (!resolved) {
+          resolved = true
+          resolve()
+        }
+      }
+    )
+
+    connection.onclose = (event) => {
+      if (!resolved) {
+        resolved = true
+        resolve()
+      }
+    };
+  })
+}
+
+export async function cpFromPod(podName: string, containerName: string, srcPath: string, tgtPath: string): Promise<void> {
+  core.debug(`Copying the files "${srcPath} from the pod "${namespace()}/${podName}" to "${tgtPath}"`)
+
+  const cp = new k8s.Cp(kc)
+  await cp.cpFromPod(namespace(), podName, containerName, parse(srcPath).base, tgtPath, dirname(srcPath))
 }
 
 export async function execPodStep(

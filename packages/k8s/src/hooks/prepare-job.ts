@@ -14,7 +14,8 @@ import {
   isPodContainerAlpine,
   prunePods,
   waitForPodPhases,
-  getPrepareJobTimeoutSeconds
+  getPrepareJobTimeoutSeconds,
+  cpToPod,
 } from '../k8s'
 import {
   containerVolumes,
@@ -24,7 +25,8 @@ import {
   mergeContainerWithOptions,
   readExtensionFromFile,
   PodPhase,
-  fixArgs
+  fixArgs,
+  usePodCpVolume
 } from '../k8s/utils'
 import { CONTAINER_EXTENSION_PREFIX, JOB_CONTAINER_NAME } from './constants'
 
@@ -101,6 +103,11 @@ export async function prepareJob(
   } catch (err) {
     await prunePods()
     throw new Error(`pod failed to come online with error: ${err}`)
+  }
+
+  if (usePodCpVolume()) {
+    core.debug('Copying files to the work volume on the workflow pod')
+    await cpToPod(createdPod.metadata.name, JOB_CONTAINER_NAME, '/home/runner/_work/.', '/__w')
   }
 
   core.debug('Job pod is ready for traffic')

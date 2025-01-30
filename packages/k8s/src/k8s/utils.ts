@@ -15,6 +15,7 @@ export const DEFAULT_CONTAINER_ENTRY_POINT = 'tail'
 export const ENV_HOOK_TEMPLATE_PATH = 'ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE'
 export const ENV_USE_KUBE_SCHEDULER = 'ACTIONS_RUNNER_USE_KUBE_SCHEDULER'
 export const ENV_COPY_NODE_SELECTOR_LABELS = 'ACTIONS_RUNNER_COPY_NODE_SELECTOR_LABELS'
+export const ENV_USE_POD_CP_VOLUME = 'ACTIONS_RUNNER_USE_POD_CP_VOLUME'
 
 export function containerVolumes(
   userMountVolumes: Mount[] = [],
@@ -285,6 +286,10 @@ export function copyNodeSelectorLabels(): boolean {
   }
 
   return nodeSelectorLabels > 0
+}
+
+export function usePodCpVolume(): boolean {
+  return process.env[ENV_USE_POD_CP_VOLUME] === 'true'
 }
 
 export enum PodPhase {
